@@ -67,6 +67,7 @@ class EmployerProfileSerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(read_only=True)
     profile = serializers.SerializerMethodField()
 
     class Meta:

@@ -31,7 +31,7 @@ class JobViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ("list", "retrieve"):
             return [permissions.AllowAny()]
-        if self.action in ("create", "update", "partial_update"):
+        if self.action in ("create", "update", "partial_update", "destroy"):
             return [permissions.IsAuthenticated(), IsEmployer()]
         if self.action in ("approve",):
             return [permissions.IsAuthenticated(), IsPlatformAdmin()]
@@ -44,8 +44,14 @@ class JobViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not (user and user.is_authenticated):
             queryset = queryset.filter(status=JobPosting.Status.APPROVED, expires_at__gte=timezone.localdate())
-        elif user.role == UserRole.EMPLOYER and self.request.query_params.get("scope") == "mine":
-            queryset = queryset.filter(employer__user=user)
+        elif user.role == UserRole.EMPLOYER:
+            if self.request.query_params.get("scope") == "mine" or self.action in ("update", "partial_update", "destroy"):
+                queryset = queryset.filter(employer__user=user)
+            else:
+                queryset = queryset.filter(
+                    Q(employer__user=user)
+                    | Q(status=JobPosting.Status.APPROVED, expires_at__gte=timezone.localdate())
+                ).distinct()
         elif not (user.role == UserRole.ADMIN or user.is_staff):
             queryset = queryset.filter(status=JobPosting.Status.APPROVED, expires_at__gte=timezone.localdate())
 
@@ -187,5 +193,3 @@ class JobAlertViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         profile, _ = JobSeekerProfile.objects.get_or_create(user=self.request.user)
         serializer.save(seeker=profile)
-
-# Create your views here.

@@ -22,8 +22,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["post"])
     def mark_all_read(self, request):
         notifications = self.get_queryset().filter(is_read=False)
+        updated = notifications.count()
         for notification in notifications:
             notification.mark_read()
-        return Response({"updated": notifications.count()})
-
-# Create your views here.
+        return Response({"updated": updated})

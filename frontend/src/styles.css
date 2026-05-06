@@ -227,6 +227,14 @@ p {
   gap: 18px;
 }
 
+.jobs-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
 .job-card {
   padding: 20px;
   display: grid;
@@ -269,6 +277,10 @@ p {
 .job-salary {
   color: var(--ink);
   font-weight: 600;
+}
+
+.feedback-copy {
+  line-height: 1.7;
 }
 
 .line-item,

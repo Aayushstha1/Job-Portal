@@ -73,7 +73,10 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.mysql",
+        # Django 5.2 requires MariaDB 10.5+, but XAMPP commonly ships 10.4.
+        # Use a project-local backend shim so local development can run on
+        # MariaDB 10.4 without changing the rest of the app code.
+        "ENGINE": "config.db_backends.mysql_compat",
         "NAME": os.environ.get("MYSQL_DATABASE", "job_portal"),
         "USER": os.environ.get("MYSQL_USER", "root"),
         "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),

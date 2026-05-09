@@ -71,22 +71,32 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-DATABASES = {
-    "default": {
-        # Django 5.2 requires MariaDB 10.5+, but XAMPP commonly ships 10.4.
-        # Use a project-local backend shim so local development can run on
-        # MariaDB 10.4 without changing the rest of the app code.
-        "ENGINE": "config.db_backends.mysql_compat",
-        "NAME": os.environ.get("MYSQL_DATABASE", "job_portal"),
-        "USER": os.environ.get("MYSQL_USER", "root"),
-        "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),
-        "HOST": os.environ.get("MYSQL_HOST", "127.0.0.1"),
-        "PORT": os.environ.get("MYSQL_PORT", "3306"),
-        "OPTIONS": {
-            "charset": "utf8mb4",
-        },
+DATABASE_BACKEND = os.environ.get("DJANGO_DB_BACKEND", "sqlite").lower()
+
+if DATABASE_BACKEND == "mysql":
+    DATABASES = {
+        "default": {
+            # Django 5.2 requires MariaDB 10.5+, but XAMPP commonly ships 10.4.
+            # Use a project-local backend shim so local development can run on
+            # MariaDB 10.4 without changing the rest of the app code.
+            "ENGINE": "config.db_backends.mysql_compat",
+            "NAME": os.environ.get("MYSQL_DATABASE", "job_portal"),
+            "USER": os.environ.get("MYSQL_USER", "root"),
+            "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),
+            "HOST": os.environ.get("MYSQL_HOST", "127.0.0.1"),
+            "PORT": os.environ.get("MYSQL_PORT", "3306"),
+            "OPTIONS": {
+                "charset": "utf8mb4",
+            },
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {

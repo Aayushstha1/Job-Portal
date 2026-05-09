@@ -856,6 +856,25 @@ function SeekerDashboard() {
   const { user } = useAuth();
   const [status, setStatus] = useState("loading");
   const [errorMessage, setErrorMessage] = useState("");
+  const [profileForm, setProfileForm] = useState({
+    full_name: "",
+    city: "",
+    experience_years: 0,
+    desired_title: "",
+    preferred_location: "",
+    education: "",
+    bio: "",
+    video_intro: "",
+  });
+  const [profileSaveStatus, setProfileSaveStatus] = useState("idle");
+  const [profileSaveMessage, setProfileSaveMessage] = useState("");
+  const [skillsCatalog, setSkillsCatalog] = useState([]);
+  const [newSkillForm, setNewSkillForm] = useState({
+    skill_id: "",
+    proficiency: 3,
+  });
+  const [skillActionStatus, setSkillActionStatus] = useState("idle");
+  const [skillActionMessage, setSkillActionMessage] = useState("");
   const [data, setData] = useState({
     profile: null,
     applications: [],
@@ -873,13 +892,14 @@ function SeekerDashboard() {
       setErrorMessage("");
 
       try {
-        const [profile, applications, notifications, jobs, savedJobs, skills] = await Promise.all([
+        const [profile, applications, notifications, jobs, savedJobs, skills, allSkills] = await Promise.all([
           apiRequest("/auth/seeker-profile/"),
           apiRequest("/applications/"),
           apiRequest("/notifications/"),
           apiRequest("/jobs/"),
           apiRequest("/jobs/saved/"),
           apiRequest("/seeker-skills/"),
+          apiRequest("/skills/"),
         ]);
 
         if (cancelled) {
@@ -894,6 +914,17 @@ function SeekerDashboard() {
           savedJobs,
           skills,
         });
+        setProfileForm({
+          full_name: profile.full_name || user.full_name || "",
+          city: profile.city || "",
+          experience_years: Number(profile.experience_years || 0),
+          desired_title: profile.desired_title || "",
+          preferred_location: profile.preferred_location || "",
+          education: profile.education || "",
+          bio: profile.bio || "",
+          video_intro: profile.video_intro || "",
+        });
+        setSkillsCatalog(Array.isArray(allSkills) ? allSkills : []);
         setStatus("ready");
       } catch (error) {
         if (cancelled) {
@@ -928,6 +959,8 @@ function SeekerDashboard() {
   const recommendedJobs = [...data.jobs]
     .sort((left, right) => Number(right.match_score || 0) - Number(left.match_score || 0))
     .slice(0, 4);
+  const selectedSkillIds = new Set(data.skills.map((entry) => entry.skill.id));
+  const addableSkills = skillsCatalog.filter((item) => !selectedSkillIds.has(item.id));
 
   const seekerMetrics = [
     {
@@ -951,6 +984,112 @@ function SeekerDashboard() {
       detail: "How complete your seeker profile currently looks.",
     },
   ];
+
+  function handleProfileFormChange(event) {
+    const { name, value } = event.target;
+    setProfileForm((current) => ({
+      ...current,
+      [name]: name === "experience_years" ? Number(value || 0) : value,
+    }));
+  }
+
+  async function handleProfileSave(event) {
+    event.preventDefault();
+    setProfileSaveStatus("saving");
+    setProfileSaveMessage("");
+    try {
+      const updatedProfile = await apiRequest("/auth/seeker-profile/", {
+        method: "PATCH",
+        body: profileForm,
+      });
+      setData((current) => ({
+        ...current,
+        profile: updatedProfile,
+      }));
+      setProfileSaveStatus("success");
+      setProfileSaveMessage("Profile updated successfully.");
+    } catch (error) {
+      setProfileSaveStatus("error");
+      setProfileSaveMessage(error.message || "Unable to update your profile right now.");
+    }
+  }
+
+  function handleNewSkillChange(event) {
+    const { name, value } = event.target;
+    setNewSkillForm((current) => ({
+      ...current,
+      [name]: name === "proficiency" ? Number(value) : value,
+    }));
+  }
+
+  async function handleAddSkill(event) {
+    event.preventDefault();
+    if (!newSkillForm.skill_id) {
+      setSkillActionStatus("error");
+      setSkillActionMessage("Please select a skill first.");
+      return;
+    }
+    setSkillActionStatus("saving");
+    setSkillActionMessage("");
+    try {
+      const created = await apiRequest("/seeker-skills/", {
+        method: "POST",
+        body: {
+          skill_id: Number(newSkillForm.skill_id),
+          proficiency: Number(newSkillForm.proficiency),
+        },
+      });
+      setData((current) => ({
+        ...current,
+        skills: [...current.skills, created],
+      }));
+      setNewSkillForm({ skill_id: "", proficiency: 3 });
+      setSkillActionStatus("success");
+      setSkillActionMessage("Skill added.");
+    } catch (error) {
+      setSkillActionStatus("error");
+      setSkillActionMessage(error.message || "Could not add this skill.");
+    }
+  }
+
+  async function handleSkillProficiencyUpdate(skillEntryId, proficiency) {
+    setSkillActionStatus("saving");
+    setSkillActionMessage("");
+    try {
+      const updated = await apiRequest(`/seeker-skills/${skillEntryId}/`, {
+        method: "PATCH",
+        body: { proficiency: Number(proficiency) },
+      });
+      setData((current) => ({
+        ...current,
+        skills: current.skills.map((item) => (item.id === skillEntryId ? updated : item)),
+      }));
+      setSkillActionStatus("success");
+      setSkillActionMessage("Skill level updated.");
+    } catch (error) {
+      setSkillActionStatus("error");
+      setSkillActionMessage(error.message || "Could not update skill level.");
+    }
+  }
+
+  async function handleSkillDelete(skillEntryId) {
+    setSkillActionStatus("saving");
+    setSkillActionMessage("");
+    try {
+      await apiRequest(`/seeker-skills/${skillEntryId}/`, {
+        method: "DELETE",
+      });
+      setData((current) => ({
+        ...current,
+        skills: current.skills.filter((item) => item.id !== skillEntryId),
+      }));
+      setSkillActionStatus("success");
+      setSkillActionMessage("Skill removed.");
+    } catch (error) {
+      setSkillActionStatus("error");
+      setSkillActionMessage(error.message || "Could not remove this skill.");
+    }
+  }
 
   return (
     <div className="page-stack">
@@ -987,6 +1126,181 @@ function SeekerDashboard() {
           <span className="card-label">Notifications</span>
           <h3>Recent updates for you</h3>
           <NotificationList notifications={data.notifications} emptyText="You have no notifications yet." />
+        </SurfaceCard>
+      </section>
+
+      <section className="dashboard-grid">
+        <SurfaceCard className="surface-card">
+          <span className="card-label">Edit profile</span>
+          <h3>Keep your candidate profile updated</h3>
+          <form className="form-grid" onSubmit={handleProfileSave}>
+            <FormField
+              field={{
+                label: "Full name",
+                name: "full_name",
+                value: profileForm.full_name,
+                onChange: handleProfileFormChange,
+                placeholder: "Your full name",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Current city",
+                name: "city",
+                value: profileForm.city,
+                onChange: handleProfileFormChange,
+                placeholder: "Kathmandu",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Experience (years)",
+                name: "experience_years",
+                type: "number",
+                value: String(profileForm.experience_years),
+                onChange: handleProfileFormChange,
+                placeholder: "2",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Desired title",
+                name: "desired_title",
+                value: profileForm.desired_title,
+                onChange: handleProfileFormChange,
+                placeholder: "Frontend Developer",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Preferred location",
+                name: "preferred_location",
+                value: profileForm.preferred_location,
+                onChange: handleProfileFormChange,
+                placeholder: "Remote",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Education",
+                name: "education",
+                value: profileForm.education,
+                onChange: handleProfileFormChange,
+                placeholder: "BSc CSIT",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Bio",
+                name: "bio",
+                value: profileForm.bio,
+                onChange: handleProfileFormChange,
+                placeholder: "Short summary about your background",
+                className: "field-wide",
+              }}
+            />
+            <FormField
+              field={{
+                label: "Video intro URL",
+                name: "video_intro",
+                value: profileForm.video_intro,
+                onChange: handleProfileFormChange,
+                placeholder: "https://...",
+                className: "field-wide",
+              }}
+            />
+            {profileSaveMessage ? (
+              <InlineMessage
+                tone={profileSaveStatus === "error" ? "error" : "success"}
+                text={profileSaveMessage}
+              />
+            ) : null}
+            <div className="panel-actions form-actions-full">
+              <button className="primary-button" type="submit" disabled={profileSaveStatus === "saving"}>
+                {profileSaveStatus === "saving" ? "Saving profile..." : "Save profile"}
+              </button>
+            </div>
+          </form>
+        </SurfaceCard>
+
+        <SurfaceCard className="surface-card">
+          <span className="card-label">Manage skills</span>
+          <h3>Add or update your skills</h3>
+          <form className="form-grid single-column-form" onSubmit={handleAddSkill}>
+            <SelectField
+              label="Add skill"
+              name="skill_id"
+              value={newSkillForm.skill_id}
+              onChange={handleNewSkillChange}
+              options={[
+                { value: "", label: addableSkills.length ? "Select skill" : "No additional skills available" },
+                ...addableSkills.map((item) => ({ value: String(item.id), label: item.name })),
+              ]}
+            />
+            <SelectField
+              label="Proficiency"
+              name="proficiency"
+              value={String(newSkillForm.proficiency)}
+              onChange={handleNewSkillChange}
+              options={[
+                { value: "1", label: "1 - Beginner" },
+                { value: "2", label: "2 - Basic" },
+                { value: "3", label: "3 - Intermediate" },
+                { value: "4", label: "4 - Advanced" },
+                { value: "5", label: "5 - Expert" },
+              ]}
+            />
+            <div className="panel-actions">
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={!addableSkills.length || skillActionStatus === "saving"}
+              >
+                Add skill
+              </button>
+            </div>
+          </form>
+
+          {skillActionMessage ? (
+            <InlineMessage
+              tone={skillActionStatus === "error" ? "error" : "success"}
+              text={skillActionMessage}
+            />
+          ) : null}
+
+          {data.skills.length > 0 ? (
+            <div className="skill-stack">
+              {data.skills.map((item) => (
+                <div className="skill-row" key={item.id}>
+                  <div>
+                    <strong>{item.skill.name}</strong>
+                    <p>{item.skill.category || "General skill"}</p>
+                  </div>
+                  <div className="list-row-end">
+                    <select
+                      value={String(item.proficiency)}
+                      onChange={(event) => handleSkillProficiencyUpdate(item.id, event.target.value)}
+                    >
+                      <option value="1">Level 1</option>
+                      <option value="2">Level 2</option>
+                      <option value="3">Level 3</option>
+                      <option value="4">Level 4</option>
+                      <option value="5">Level 5</option>
+                    </select>
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      onClick={() => handleSkillDelete(item.id)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-copy">No skills added yet. Add your first skill above.</p>
+          )}
         </SurfaceCard>
       </section>
 

@@ -608,12 +608,25 @@ function RegisterPage() {
 
 function JobsPage() {
   const { isAuthenticated, user } = useAuth();
+  const isSeeker = isAuthenticated && user.role === "job_seeker";
   const [formFilters, setFormFilters] = useState(emptyJobFilters);
   const [appliedFilters, setAppliedFilters] = useState(emptyJobFilters);
   const [jobs, setJobs] = useState([]);
   const [status, setStatus] = useState("loading");
   const [errorMessage, setErrorMessage] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [selectedJobId, setSelectedJobId] = useState(null);
+  const [selectedJobDetail, setSelectedJobDetail] = useState(null);
+  const [detailStatus, setDetailStatus] = useState("idle");
+  const [detailErrorMessage, setDetailErrorMessage] = useState("");
+  const [savedJobs, setSavedJobs] = useState([]);
+  const [applications, setApplications] = useState([]);
+  const [jobAlerts, setJobAlerts] = useState([]);
+  const [actionMessage, setActionMessage] = useState("");
+  const [actionTone, setActionTone] = useState("success");
+  const [jobActionStatus, setJobActionStatus] = useState("idle");
+  const [alertActionStatus, setAlertActionStatus] = useState("idle");
+  const [coverLetter, setCoverLetter] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -631,17 +644,30 @@ function JobsPage() {
       const path = params.toString() ? `/jobs/?${params.toString()}` : "/jobs/";
 
       try {
-        const response = await apiRequest(path);
+        const requests = [apiRequest(path)];
+        if (isSeeker) {
+          requests.push(apiRequest("/jobs/saved/"));
+          requests.push(apiRequest("/applications/"));
+          requests.push(apiRequest("/job-alerts/"));
+        }
+        const response = await Promise.all(requests);
         if (cancelled) {
           return;
         }
-        setJobs(Array.isArray(response) ? response : []);
+        const [jobsResponse, savedResponse = [], applicationsResponse = [], alertsResponse = []] = response;
+        setJobs(Array.isArray(jobsResponse) ? jobsResponse : []);
+        setSavedJobs(Array.isArray(savedResponse) ? savedResponse : []);
+        setApplications(Array.isArray(applicationsResponse) ? applicationsResponse : []);
+        setJobAlerts(Array.isArray(alertsResponse) ? alertsResponse : []);
         setStatus("ready");
       } catch (error) {
         if (cancelled) {
           return;
         }
         setJobs([]);
+        setSavedJobs([]);
+        setApplications([]);
+        setJobAlerts([]);
         setErrorMessage(error.message || "Unable to load jobs right now.");
         setStatus("error");
       }
@@ -651,7 +677,66 @@ function JobsPage() {
     return () => {
       cancelled = true;
     };
-  }, [appliedFilters, refreshTick]);
+  }, [appliedFilters, isSeeker, refreshTick]);
+
+  useEffect(() => {
+    if (!isSeeker) {
+      setSelectedJobId(null);
+      setSelectedJobDetail(null);
+      setDetailStatus("idle");
+      setDetailErrorMessage("");
+      return;
+    }
+
+    if (!jobs.length) {
+      setSelectedJobId(null);
+      setSelectedJobDetail(null);
+      setDetailStatus("idle");
+      setDetailErrorMessage("");
+      return;
+    }
+
+    const stillVisible = jobs.some((job) => job.id === selectedJobId);
+    if (!stillVisible) {
+      setSelectedJobId(jobs[0].id);
+      setCoverLetter("");
+      setActionMessage("");
+    }
+  }, [isSeeker, jobs, selectedJobId]);
+
+  useEffect(() => {
+    if (!isSeeker || !selectedJobId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadJobDetail() {
+      setDetailStatus("loading");
+      setDetailErrorMessage("");
+
+      try {
+        const response = await apiRequest(`/jobs/${selectedJobId}/`);
+        if (cancelled) {
+          return;
+        }
+        setSelectedJobDetail(response);
+        setDetailStatus("ready");
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setSelectedJobDetail(null);
+        setDetailStatus("error");
+        setDetailErrorMessage(error.message || "Unable to load the AI match breakdown for this job.");
+      }
+    }
+
+    loadJobDetail();
+    return () => {
+      cancelled = true;
+    };
+  }, [isSeeker, selectedJobId]);
 
   function handleFilterChange(event) {
     const { name, value } = event.target;
@@ -664,15 +749,123 @@ function JobsPage() {
   function handleSearch(event) {
     event.preventDefault();
     setAppliedFilters(formFilters);
+    setActionMessage("");
   }
 
   function handleReset() {
     setFormFilters(emptyJobFilters);
     setAppliedFilters(emptyJobFilters);
     setRefreshTick((current) => current + 1);
+    setActionMessage("");
   }
 
   const jobStats = summarizeJobs(jobs);
+  const savedJobIds = new Set(savedJobs.map((job) => job.id));
+  const appliedJobIds = new Set(applications.map((application) => application.job));
+  const selectedJobIsSaved = selectedJobDetail ? savedJobIds.has(selectedJobDetail.id) : false;
+  const selectedJobAlreadyApplied = selectedJobDetail ? appliedJobIds.has(selectedJobDetail.id) : false;
+  const selectedJobAlertExists = selectedJobDetail
+    ? jobAlerts.some((alert) => alert.is_active && alertsMatchJob(alert, selectedJobDetail))
+    : false;
+
+  async function handleSaveToggle(job) {
+    setJobActionStatus(`saving-${job.id}`);
+    setActionMessage("");
+
+    try {
+      const response = await apiRequest(`/jobs/${job.id}/save/`, {
+        method: "POST",
+      });
+      if (response.saved) {
+        const savedSummary = createJobSummary(job);
+        setSavedJobs((current) => [savedSummary, ...current.filter((item) => item.id !== job.id)]);
+        setActionTone("success");
+        setActionMessage("Job saved to your shortlist.");
+      } else {
+        setSavedJobs((current) => current.filter((item) => item.id !== job.id));
+        setActionTone("success");
+        setActionMessage("Job removed from your shortlist.");
+      }
+    } catch (error) {
+      setActionTone("error");
+      setActionMessage(error.message || "Unable to update your saved jobs.");
+    } finally {
+      setJobActionStatus("idle");
+    }
+  }
+
+  async function handleApply(jobId) {
+    setJobActionStatus(`applying-${jobId}`);
+    setActionMessage("");
+
+    try {
+      const createdApplication = await apiRequest(`/jobs/${jobId}/apply/`, {
+        method: "POST",
+        body: {
+          cover_letter: coverLetter,
+        },
+      });
+      setApplications((current) => [createdApplication, ...current]);
+      setJobs((current) =>
+        current.map((job) =>
+          job.id === jobId
+            ? {
+                ...job,
+                applications_count: Number(job.applications_count || 0) + 1,
+              }
+            : job,
+        ),
+      );
+      setSelectedJobDetail((current) =>
+        current && current.id === jobId
+          ? {
+              ...current,
+              applications_count: Number(current.applications_count || 0) + 1,
+            }
+          : current,
+      );
+      setCoverLetter("");
+      setActionTone("success");
+      setActionMessage("Application submitted. The employer now has your match score and skill profile.");
+    } catch (error) {
+      setActionTone("error");
+      setActionMessage(error.message || "Unable to submit your application right now.");
+    } finally {
+      setJobActionStatus("idle");
+    }
+  }
+
+  async function handleCreateAlert() {
+    if (!selectedJobDetail) {
+      return;
+    }
+
+    setAlertActionStatus("saving");
+    setActionMessage("");
+
+    try {
+      const createdAlert = await apiRequest("/job-alerts/", {
+        method: "POST",
+        body: {
+          keywords: appliedFilters.title || selectedJobDetail.title,
+          location: appliedFilters.location || selectedJobDetail.location,
+          salary_min: selectedJobDetail.salary_min,
+          salary_max: selectedJobDetail.salary_max,
+          job_type: appliedFilters.job_type || selectedJobDetail.job_type,
+          industry: selectedJobDetail.industry || "",
+          is_active: true,
+        },
+      });
+      setJobAlerts((current) => [createdAlert, ...current]);
+      setActionTone("success");
+      setActionMessage("Job alert created. Matching roles will now be tracked from your seeker dashboard.");
+    } catch (error) {
+      setActionTone("error");
+      setActionMessage(error.message || "Unable to create a job alert from this role.");
+    } finally {
+      setAlertActionStatus("idle");
+    }
+  }
 
   return (
     <div className="page-stack">
@@ -779,6 +972,37 @@ function JobsPage() {
         ))}
       </section>
 
+      {isSeeker ? (
+        <section className="surface-card insight-banner">
+          <div>
+            <span className="card-label">AI Match Lab</span>
+            <h3>Inspect how well you fit each role before you apply.</h3>
+            <p className="muted-copy">
+              Open a role to see its live match score, missing skills, learning links, saved-state, and
+              one-click alert setup for similar openings.
+            </p>
+          </div>
+          <div className="insight-metrics">
+            <div className="mini-stat">
+              <strong>{savedJobs.length}</strong>
+              <span>saved jobs</span>
+            </div>
+            <div className="mini-stat">
+              <strong>{jobAlerts.length}</strong>
+              <span>alerts</span>
+            </div>
+            <div className="mini-stat">
+              <strong>{applications.length}</strong>
+              <span>applications</span>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {actionMessage ? (
+        <InlineMessage tone={actionTone === "error" ? "error" : "success"} text={actionMessage} />
+      ) : null}
+
       {status === "loading" ? <SkeletonBoard /> : null}
 
       {status === "error" ? (
@@ -804,49 +1028,291 @@ function JobsPage() {
       ) : null}
 
       {status === "ready" && jobs.length > 0 ? (
-        <section className="jobs-board">
-          {jobs.map((job) => (
-            <article className="surface-card job-card" key={job.id}>
-              <div className="job-card-top">
-                <div>
-                  <span className="card-label">{formatEnumLabel(job.work_mode)}</span>
-                  <h3>{job.title}</h3>
-                  <p className="company-line">{job.employer_name}</p>
-                </div>
-                <span className="soft-pill">
-                  {job.match_score == null ? "Public listing" : `${Math.round(Number(job.match_score))}% match`}
-                </span>
-              </div>
+        isSeeker ? (
+          <section className="insight-layout">
+            <div className="jobs-board job-collection">
+              {jobs.map((job) => {
+                const isSelected = job.id === selectedJobId;
+                const isSaved = savedJobIds.has(job.id);
+                const alreadyApplied = appliedJobIds.has(job.id);
 
-              <p className="job-salary">{formatSalary(job.salary_min, job.salary_max)}</p>
+                return (
+                  <article
+                    className={isSelected ? "surface-card job-card job-card-selected" : "surface-card job-card"}
+                    key={job.id}
+                  >
+                    <div className="job-card-top">
+                      <div>
+                        <span className="card-label">{formatEnumLabel(job.work_mode)}</span>
+                        <h3>{job.title}</h3>
+                        <p className="company-line">{job.employer_name}</p>
+                      </div>
+                      <span className={`soft-pill ${matchToneClass(job.match_score)}`}>
+                        {job.match_score == null ? "Public listing" : `${Math.round(Number(job.match_score))}% match`}
+                      </span>
+                    </div>
 
-              <div className="meta-row">
-                <span className="meta-chip">{job.location}</span>
-                <span className="meta-chip">{formatEnumLabel(job.job_type)}</span>
-                {job.industry ? <span className="meta-chip">{job.industry}</span> : null}
-                <span className="meta-chip">Closes {formatDate(job.expires_at)}</span>
-              </div>
+                    <p className="job-salary">{formatSalary(job.salary_min, job.salary_max)}</p>
 
-              <div className="job-card-footer">
-                <div className="subtle-metrics">
-                  <span>{job.views_count} views</span>
-                  <span>{job.applications_count} applications</span>
+                    <div className="meta-row">
+                      <span className="meta-chip">{job.location}</span>
+                      <span className="meta-chip">{formatEnumLabel(job.job_type)}</span>
+                      {job.industry ? <span className="meta-chip">{job.industry}</span> : null}
+                      {job.blind_hiring ? <span className="meta-chip">Blind hiring</span> : null}
+                      <span className="meta-chip">Closes {formatDate(job.expires_at)}</span>
+                    </div>
+
+                    <div className="job-card-footer">
+                      <div className="subtle-metrics">
+                        <span>{job.views_count} views</span>
+                        <span>{job.applications_count} applications</span>
+                        <span>{alreadyApplied ? "Already applied" : "Ready to inspect"}</span>
+                      </div>
+                      <div className="job-card-actions">
+                        <button
+                          className="primary-button compact"
+                          type="button"
+                          onClick={() => {
+                            setSelectedJobId(job.id);
+                            setCoverLetter("");
+                            setActionMessage("");
+                          }}
+                        >
+                          {isSelected ? "Viewing fit" : "Inspect fit"}
+                        </button>
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          onClick={() => handleSaveToggle(job)}
+                          disabled={jobActionStatus !== "idle"}
+                        >
+                          {jobActionStatus === `saving-${job.id}` ? "Saving..." : isSaved ? "Saved" : "Save"}
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            <aside className="surface-card insight-panel">
+              <span className="card-label">Selected role</span>
+              {detailStatus === "loading" ? (
+                <div className="insight-empty">
+                  <h3>Preparing your match breakdown...</h3>
+                  <p className="muted-copy">
+                    Pulling requirements, skill gaps, and employer context from the backend.
+                  </p>
                 </div>
-                <div className="job-card-actions">
-                  {isAuthenticated ? (
-                    <NavLink className="secondary-button compact" to={dashboardPathForRole(user.role)}>
-                      Continue in dashboard
-                    </NavLink>
-                  ) : (
-                    <NavLink className="primary-button compact" to="/login">
-                      Login to continue
-                    </NavLink>
-                  )}
+              ) : null}
+
+              {detailStatus === "error" ? (
+                <div className="insight-empty">
+                  <h3>Could not load this role</h3>
+                  <p className="muted-copy">{detailErrorMessage}</p>
                 </div>
-              </div>
-            </article>
-          ))}
-        </section>
+              ) : null}
+
+              {detailStatus === "ready" && selectedJobDetail ? (
+                <div className="insight-stack">
+                  <div className="insight-header">
+                    <div>
+                      <h3>{selectedJobDetail.title}</h3>
+                      <p>{selectedJobDetail.employer.company_name}</p>
+                    </div>
+                    <span className={`soft-pill ${matchToneClass(selectedJobDetail.match_score)}`}>
+                      {Math.round(Number(selectedJobDetail.match_score || 0))}% fit
+                    </span>
+                  </div>
+
+                  <div className="meta-row">
+                    <span className="meta-chip">{selectedJobDetail.location}</span>
+                    <span className="meta-chip">{formatEnumLabel(selectedJobDetail.job_type)}</span>
+                    <span className="meta-chip">{formatEnumLabel(selectedJobDetail.work_mode)}</span>
+                    {selectedJobDetail.blind_hiring ? <span className="meta-chip">Blind hiring enabled</span> : null}
+                  </div>
+
+                  <div className="detail-list">
+                    <DetailRow label="Salary" value={formatSalary(selectedJobDetail.salary_min, selectedJobDetail.salary_max)} />
+                    <DetailRow label="Closes" value={formatDate(selectedJobDetail.expires_at)} />
+                    <DetailRow label="Company" value={selectedJobDetail.employer.company_name} />
+                    <DetailRow label="Industry" value={selectedJobDetail.industry || "Not specified"} />
+                  </div>
+
+                  <section className="insight-section">
+                    <h4>AI fit summary</h4>
+                    {selectedJobDetail.skill_gap.length > 0 ? (
+                      <div className="gap-stack">
+                        {selectedJobDetail.skill_gap.map((gap) => (
+                          <article className="gap-card" key={`${selectedJobDetail.id}-${gap.skill}`}>
+                            <div className="gap-card-top">
+                              <strong>{gap.skill}</strong>
+                              <span className={`soft-pill ${gap.importance === "required" ? "soft-pill-danger" : "soft-pill-neutral"}`}>
+                                {formatEnumLabel(gap.importance)}
+                              </span>
+                            </div>
+                            <p>
+                              You are at level {gap.your_level}; this role asks for level {gap.required_level}.
+                            </p>
+                            {gap.resources.length > 0 ? (
+                              <div className="resource-row">
+                                {gap.resources.slice(0, 3).map((resource) => (
+                                  <a
+                                    className="resource-link"
+                                    href={resource.url}
+                                    key={resource.url}
+                                    rel="noreferrer"
+                                    target="_blank"
+                                  >
+                                    {resource.provider || "Learn"}: {resource.title}
+                                  </a>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="helper-note">No linked resources yet for this gap.</p>
+                            )}
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="positive-callout">
+                        <strong>Strong fit signal</strong>
+                        <p className="muted-copy">
+                          Your tracked skills currently cover the listed requirements for this job.
+                        </p>
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="insight-section">
+                    <h4>Required skills</h4>
+                    {selectedJobDetail.requirements.length > 0 ? (
+                      <div className="requirement-stack">
+                        {selectedJobDetail.requirements.map((requirement) => (
+                          <div className="requirement-row" key={requirement.id}>
+                            <div>
+                              <strong>{requirement.skill.name}</strong>
+                              <p>{requirement.skill.category || "General skill"}</p>
+                            </div>
+                            <div className="list-row-end">
+                              <span className={`soft-pill ${requirement.importance === "required" ? "soft-pill-danger" : "soft-pill-neutral"}`}>
+                                {formatEnumLabel(requirement.importance)}
+                              </span>
+                              <small>Level {requirement.minimum_proficiency}+ expected</small>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="muted-copy">This role does not have structured skill requirements yet.</p>
+                    )}
+                  </section>
+
+                  <section className="insight-section">
+                    <h4>Role snapshot</h4>
+                    <p>{selectedJobDetail.description}</p>
+                    {selectedJobDetail.responsibilities ? (
+                      <p className="responsibility-copy">{selectedJobDetail.responsibilities}</p>
+                    ) : null}
+                  </section>
+
+                  <section className="insight-section">
+                    <h4>Quick apply</h4>
+                    <TextAreaField
+                      label="Cover letter"
+                      name="cover_letter"
+                      value={coverLetter}
+                      onChange={(event) => setCoverLetter(event.target.value)}
+                      placeholder="Add a short note about why this role fits your experience."
+                    />
+                    <div className="job-card-actions">
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => handleApply(selectedJobDetail.id)}
+                        disabled={selectedJobAlreadyApplied || jobActionStatus !== "idle"}
+                      >
+                        {selectedJobAlreadyApplied
+                          ? "Already applied"
+                          : jobActionStatus === `applying-${selectedJobDetail.id}`
+                            ? "Submitting..."
+                            : "Apply now"}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => handleSaveToggle(selectedJobDetail)}
+                        disabled={jobActionStatus !== "idle"}
+                      >
+                        {jobActionStatus === `saving-${selectedJobDetail.id}`
+                          ? "Saving..."
+                          : selectedJobIsSaved
+                            ? "Saved to shortlist"
+                            : "Save for later"}
+                      </button>
+                    </div>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={handleCreateAlert}
+                      disabled={selectedJobAlertExists || alertActionStatus === "saving"}
+                    >
+                      {selectedJobAlertExists
+                        ? "Alert already active"
+                        : alertActionStatus === "saving"
+                          ? "Creating alert..."
+                          : "Track similar jobs"}
+                    </button>
+                  </section>
+                </div>
+              ) : null}
+            </aside>
+          </section>
+        ) : (
+          <section className="jobs-board">
+            {jobs.map((job) => (
+              <article className="surface-card job-card" key={job.id}>
+                <div className="job-card-top">
+                  <div>
+                    <span className="card-label">{formatEnumLabel(job.work_mode)}</span>
+                    <h3>{job.title}</h3>
+                    <p className="company-line">{job.employer_name}</p>
+                  </div>
+                  <span className="soft-pill">
+                    {job.match_score == null ? "Public listing" : `${Math.round(Number(job.match_score))}% match`}
+                  </span>
+                </div>
+
+                <p className="job-salary">{formatSalary(job.salary_min, job.salary_max)}</p>
+
+                <div className="meta-row">
+                  <span className="meta-chip">{job.location}</span>
+                  <span className="meta-chip">{formatEnumLabel(job.job_type)}</span>
+                  {job.industry ? <span className="meta-chip">{job.industry}</span> : null}
+                  <span className="meta-chip">Closes {formatDate(job.expires_at)}</span>
+                </div>
+
+                <div className="job-card-footer">
+                  <div className="subtle-metrics">
+                    <span>{job.views_count} views</span>
+                    <span>{job.applications_count} applications</span>
+                  </div>
+                  <div className="job-card-actions">
+                    {isAuthenticated ? (
+                      <NavLink className="secondary-button compact" to={dashboardPathForRole(user.role)}>
+                        Continue in dashboard
+                      </NavLink>
+                    ) : (
+                      <NavLink className="primary-button compact" to="/login">
+                        Login to continue
+                      </NavLink>
+                    )}
+                  </div>
+                </div>
+              </article>
+            ))}
+          </section>
+        )
       ) : null}
     </div>
   );
@@ -882,7 +1348,14 @@ function SeekerDashboard() {
     jobs: [],
     savedJobs: [],
     skills: [],
+    jobAlerts: [],
   });
+  const [savedJobsStatus, setSavedJobsStatus] = useState("idle");
+  const [savedJobsMessage, setSavedJobsMessage] = useState("");
+  const [savedJobsTone, setSavedJobsTone] = useState("success");
+  const [alertActionStatus, setAlertActionStatus] = useState("idle");
+  const [alertActionMessage, setAlertActionMessage] = useState("");
+  const [alertActionTone, setAlertActionTone] = useState("success");
 
   useEffect(() => {
     let cancelled = false;
@@ -892,7 +1365,7 @@ function SeekerDashboard() {
       setErrorMessage("");
 
       try {
-        const [profile, applications, notifications, jobs, savedJobs, skills, allSkills] = await Promise.all([
+        const [profile, applications, notifications, jobs, savedJobs, skills, allSkills, jobAlerts] = await Promise.all([
           apiRequest("/auth/seeker-profile/"),
           apiRequest("/applications/"),
           apiRequest("/notifications/"),
@@ -900,6 +1373,7 @@ function SeekerDashboard() {
           apiRequest("/jobs/saved/"),
           apiRequest("/seeker-skills/"),
           apiRequest("/skills/"),
+          apiRequest("/job-alerts/"),
         ]);
 
         if (cancelled) {
@@ -913,6 +1387,7 @@ function SeekerDashboard() {
           jobs,
           savedJobs,
           skills,
+          jobAlerts,
         });
         setProfileForm({
           full_name: profile.full_name || user.full_name || "",
@@ -961,6 +1436,7 @@ function SeekerDashboard() {
     .slice(0, 4);
   const selectedSkillIds = new Set(data.skills.map((entry) => entry.skill.id));
   const addableSkills = skillsCatalog.filter((item) => !selectedSkillIds.has(item.id));
+  const learningRoadmap = buildLearningRoadmap(data.applications);
 
   const seekerMetrics = [
     {
@@ -1088,6 +1564,75 @@ function SeekerDashboard() {
     } catch (error) {
       setSkillActionStatus("error");
       setSkillActionMessage(error.message || "Could not remove this skill.");
+    }
+  }
+
+  async function handleSavedJobToggle(jobId) {
+    setSavedJobsStatus(`saving-${jobId}`);
+    setSavedJobsMessage("");
+
+    try {
+      await apiRequest(`/jobs/${jobId}/save/`, {
+        method: "POST",
+      });
+      setData((current) => ({
+        ...current,
+        savedJobs: current.savedJobs.filter((item) => item.id !== jobId),
+      }));
+      setSavedJobsTone("success");
+      setSavedJobsMessage("Saved jobs updated.");
+    } catch (error) {
+      setSavedJobsTone("error");
+      setSavedJobsMessage(error.message || "Could not update your saved jobs.");
+    } finally {
+      setSavedJobsStatus("idle");
+    }
+  }
+
+  async function handleAlertToggle(alert) {
+    setAlertActionStatus(`saving-${alert.id}`);
+    setAlertActionMessage("");
+
+    try {
+      const updatedAlert = await apiRequest(`/job-alerts/${alert.id}/`, {
+        method: "PATCH",
+        body: {
+          is_active: !alert.is_active,
+        },
+      });
+      setData((current) => ({
+        ...current,
+        jobAlerts: current.jobAlerts.map((item) => (item.id === alert.id ? updatedAlert : item)),
+      }));
+      setAlertActionTone("success");
+      setAlertActionMessage(updatedAlert.is_active ? "Alert enabled." : "Alert paused.");
+    } catch (error) {
+      setAlertActionTone("error");
+      setAlertActionMessage(error.message || "Could not update that alert.");
+    } finally {
+      setAlertActionStatus("idle");
+    }
+  }
+
+  async function handleAlertDelete(alertId) {
+    setAlertActionStatus(`saving-${alertId}`);
+    setAlertActionMessage("");
+
+    try {
+      await apiRequest(`/job-alerts/${alertId}/`, {
+        method: "DELETE",
+      });
+      setData((current) => ({
+        ...current,
+        jobAlerts: current.jobAlerts.filter((item) => item.id !== alertId),
+      }));
+      setAlertActionTone("success");
+      setAlertActionMessage("Alert removed.");
+    } catch (error) {
+      setAlertActionTone("error");
+      setAlertActionMessage(error.message || "Could not remove that alert.");
+    } finally {
+      setAlertActionStatus("idle");
     }
   }
 
@@ -1317,7 +1862,7 @@ function SeekerDashboard() {
                     <p>{job.employer_name}</p>
                   </div>
                   <div className="list-row-end">
-                    <span className="soft-pill">
+                    <span className={`soft-pill ${matchToneClass(job.match_score)}`}>
                       {job.match_score == null ? "Public listing" : `${Math.round(Number(job.match_score))}% match`}
                     </span>
                     <small>{job.location}</small>
@@ -1330,6 +1875,48 @@ function SeekerDashboard() {
           )}
         </SurfaceCard>
 
+        <SurfaceCard className="surface-card">
+          <span className="card-label">Saved jobs</span>
+          <h3>Your shortlist</h3>
+          {savedJobsMessage ? (
+            <InlineMessage tone={savedJobsTone} text={savedJobsMessage} />
+          ) : null}
+          {data.savedJobs.length > 0 ? (
+            <div className="list-stack">
+              {data.savedJobs.map((job) => (
+                <div className="list-row" key={job.id}>
+                  <div>
+                    <strong>{job.title}</strong>
+                    <p>{job.employer_name}</p>
+                  </div>
+                  <div className="list-row-end">
+                    <span className={`soft-pill ${matchToneClass(job.match_score)}`}>
+                      {job.match_score == null ? "Saved" : `${Math.round(Number(job.match_score))}% match`}
+                    </span>
+                    <div className="button-group-compact">
+                      <NavLink className="secondary-button compact" to="/jobs">
+                        Open jobs
+                      </NavLink>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() => handleSavedJobToggle(job.id)}
+                        disabled={savedJobsStatus !== "idle"}
+                      >
+                        {savedJobsStatus === `saving-${job.id}` ? "Removing..." : "Remove"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-copy">You have not saved any jobs yet. Use the AI Match Lab on the jobs page to build a shortlist.</p>
+          )}
+        </SurfaceCard>
+      </section>
+
+      <section className="dashboard-grid">
         <SurfaceCard className="surface-card">
           <span className="card-label">Skill inventory</span>
           <h3>Your tracked skills</h3>
@@ -1349,32 +1936,123 @@ function SeekerDashboard() {
             <p className="muted-copy">No seeker skills have been added yet.</p>
           )}
         </SurfaceCard>
+
+        <SurfaceCard className="surface-card accent-surface">
+          <span className="card-label">Job alerts</span>
+          <h3>Searches you are tracking</h3>
+          {alertActionMessage ? (
+            <InlineMessage tone={alertActionTone} text={alertActionMessage} />
+          ) : null}
+          {data.jobAlerts.length > 0 ? (
+            <div className="list-stack">
+              {data.jobAlerts.map((alert) => (
+                <div className="list-row block-row" key={alert.id}>
+                  <div>
+                    <strong>{formatJobAlertTitle(alert)}</strong>
+                    <p>{formatJobAlertSummary(alert)}</p>
+                  </div>
+                  <div className="list-row-end">
+                    <span className={alert.is_active ? "soft-pill soft-pill-success" : "soft-pill soft-pill-neutral"}>
+                      {alert.is_active ? "Active" : "Paused"}
+                    </span>
+                    <div className="button-group-compact">
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() => handleAlertToggle(alert)}
+                        disabled={alertActionStatus !== "idle"}
+                      >
+                        {alertActionStatus === `saving-${alert.id}` ? "Updating..." : alert.is_active ? "Pause" : "Resume"}
+                      </button>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() => handleAlertDelete(alert.id)}
+                        disabled={alertActionStatus !== "idle"}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-copy">No alerts yet. Create one from a job inside the AI Match Lab on the jobs board.</p>
+          )}
+        </SurfaceCard>
       </section>
 
-      <SurfaceCard className="surface-card">
-        <span className="card-label">Application timeline</span>
-        <h3>Your latest applications</h3>
-        {data.applications.length > 0 ? (
-          <div className="list-stack">
-            {data.applications.map((application) => (
-              <div className="list-row" key={application.id}>
-                <div>
-                  <strong>{application.job_title}</strong>
-                  <p>{application.employer_name}</p>
+      <section className="dashboard-grid">
+        <SurfaceCard className="surface-card spotlight-surface">
+          <span className="card-label">Learning roadmap</span>
+          <h3>Most common skill gaps from your applications</h3>
+          {learningRoadmap.length > 0 ? (
+            <div className="gap-stack">
+              {learningRoadmap.map((item) => (
+                <article className="gap-card" key={item.skill}>
+                  <div className="gap-card-top">
+                    <strong>{item.skill}</strong>
+                    <span className={`soft-pill ${item.requiredCount > 0 ? "soft-pill-danger" : "soft-pill-neutral"}`}>
+                      {item.requiredCount > 0 ? "Required gap" : "Nice-to-have gap"}
+                    </span>
+                  </div>
+                  <p>
+                    Missing across {item.count} application{item.count === 1 ? "" : "s"}.
+                    Highest target level: {item.maxRequiredLevel}.
+                  </p>
+                  {item.resources.length > 0 ? (
+                    <div className="resource-row">
+                      {item.resources.map((resource) => (
+                        <a
+                          className="resource-link"
+                          href={resource.url}
+                          key={resource.url}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          {resource.provider || "Learn"}: {resource.title}
+                        </a>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="helper-note">No linked learning resources yet for this skill.</p>
+                  )}
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-copy">
+              Apply to jobs with structured requirements and your personalized learning roadmap will start building itself here.
+            </p>
+          )}
+        </SurfaceCard>
+
+        <SurfaceCard className="surface-card">
+          <span className="card-label">Application timeline</span>
+          <h3>Your latest applications</h3>
+          {data.applications.length > 0 ? (
+            <div className="list-stack">
+              {data.applications.map((application) => (
+                <div className="list-row" key={application.id}>
+                  <div>
+                    <strong>{application.job_title}</strong>
+                    <p>{application.employer_name}</p>
+                  </div>
+                  <div className="list-row-end">
+                    <span className={`soft-pill ${statusToneClass(application.status)}`}>
+                      {formatEnumLabel(application.status)}
+                    </span>
+                    <small>{formatDateTime(application.created_at)}</small>
+                  </div>
                 </div>
-                <div className="list-row-end">
-                  <span className={`soft-pill ${statusToneClass(application.status)}`}>
-                    {formatEnumLabel(application.status)}
-                  </span>
-                  <small>{formatDateTime(application.created_at)}</small>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="muted-copy">You have not applied to any jobs yet.</p>
-        )}
-      </SurfaceCard>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-copy">You have not applied to any jobs yet.</p>
+          )}
+        </SurfaceCard>
+      </section>
     </div>
   );
 }
@@ -1897,6 +2575,20 @@ function FormField({ field }) {
   );
 }
 
+function TextAreaField({ label, name, onChange, placeholder, value, className }) {
+  return (
+    <label className={`field-shell ${className || ""}`.trim()}>
+      <span>{label}</span>
+      <textarea
+        name={name}
+        onChange={onChange}
+        placeholder={placeholder}
+        value={value}
+      />
+    </label>
+  );
+}
+
 function SelectField({ label, name, onChange, options, value }) {
   return (
     <label className="field-shell">
@@ -1923,7 +2615,15 @@ function DetailRow({ label, value }) {
 
 function InlineMessage({ text, tone }) {
   return (
-    <p className={`inline-message ${tone === "error" ? "inline-message-error" : ""}`}>
+    <p
+      className={`inline-message ${
+        tone === "error"
+          ? "inline-message-error"
+          : tone === "success"
+            ? "inline-message-success"
+            : ""
+      }`}
+    >
       {text}
     </p>
   );
@@ -2039,11 +2739,131 @@ function statusToneClass(status) {
   return "";
 }
 
+function matchToneClass(score) {
+  if (score == null) {
+    return "soft-pill-neutral";
+  }
+  const numericScore = Number(score || 0);
+  if (numericScore >= 80) {
+    return "soft-pill-success";
+  }
+  if (numericScore >= 60) {
+    return "soft-pill-info";
+  }
+  if (numericScore > 0) {
+    return "soft-pill-neutral";
+  }
+  return "soft-pill-danger";
+}
+
 function formatEnumLabel(value) {
   return value
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function createJobSummary(job) {
+  return {
+    id: job.id,
+    title: job.title,
+    slug: job.slug,
+    employer_name: job.employer_name || job.employer?.company_name || "Employer",
+    location: job.location,
+    industry: job.industry,
+    salary_min: job.salary_min,
+    salary_max: job.salary_max,
+    job_type: job.job_type,
+    work_mode: job.work_mode,
+    status: job.status,
+    blind_hiring: job.blind_hiring,
+    expires_at: job.expires_at,
+    views_count: job.views_count || 0,
+    applications_count: job.applications_count || 0,
+    match_score: job.match_score,
+  };
+}
+
+function alertsMatchJob(alert, job) {
+  const keyword = (alert.keywords || "").trim().toLowerCase();
+  const jobTitle = (job.title || "").trim().toLowerCase();
+  const location = (alert.location || "").trim().toLowerCase();
+  const jobLocation = (job.location || "").trim().toLowerCase();
+  const alertIndustry = (alert.industry || "").trim().toLowerCase();
+  const jobIndustry = (job.industry || "").trim().toLowerCase();
+
+  return (
+    keyword === jobTitle &&
+    location === jobLocation &&
+    (alert.job_type || "") === (job.job_type || "") &&
+    alertIndustry === jobIndustry
+  );
+}
+
+function formatJobAlertTitle(alert) {
+  return alert.keywords || alert.industry || alert.location || "Custom alert";
+}
+
+function formatJobAlertSummary(alert) {
+  const pieces = [];
+  if (alert.location) {
+    pieces.push(alert.location);
+  }
+  if (alert.job_type) {
+    pieces.push(formatEnumLabel(alert.job_type));
+  }
+  if (alert.industry) {
+    pieces.push(alert.industry);
+  }
+  if (alert.salary_min != null || alert.salary_max != null) {
+    pieces.push(formatSalary(alert.salary_min, alert.salary_max));
+  }
+  return pieces.length ? pieces.join(" • ") : "No filter details saved";
+}
+
+function buildLearningRoadmap(applications) {
+  const roadmap = new Map();
+
+  applications.forEach((application) => {
+    (application.skill_gap_summary || []).forEach((gap) => {
+      const existing = roadmap.get(gap.skill) || {
+        skill: gap.skill,
+        count: 0,
+        requiredCount: 0,
+        maxRequiredLevel: 0,
+        resources: [],
+      };
+      existing.count += 1;
+      if (gap.importance === "required") {
+        existing.requiredCount += 1;
+      }
+      existing.maxRequiredLevel = Math.max(existing.maxRequiredLevel, Number(gap.required_level || 0));
+      existing.resources = mergeRoadmapResources(existing.resources, gap.resources || []);
+      roadmap.set(gap.skill, existing);
+    });
+  });
+
+  return [...roadmap.values()]
+    .sort((left, right) => {
+      if (right.requiredCount !== left.requiredCount) {
+        return right.requiredCount - left.requiredCount;
+      }
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+      return left.skill.localeCompare(right.skill);
+    })
+    .slice(0, 4);
+}
+
+function mergeRoadmapResources(existingResources, incomingResources) {
+  const merged = [...existingResources];
+  incomingResources.forEach((resource) => {
+    if (!merged.some((item) => item.url === resource.url)) {
+      merged.push(resource);
+    }
+  });
+  return merged.slice(0, 3);
 }
 
 function formatSalary(min, max) {
